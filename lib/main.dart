@@ -1,7 +1,18 @@
+
+import 'dart:ffi';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_blue_plus/flutter_blue_plus.dart';
+import 'package:excel/excel.dart';
 import 'dart:math';
 import 'dart:async';
+import 'package:path_provider/path_provider.dart';
+import 'dart:io';
+import 'package:permission_handler/permission_handler.dart';
+import 'package:http/http.dart' as http;
+import 'dart:convert';
+import 'package:intl/intl.dart';
+
 
 void main() {
   runApp(MyApp());
@@ -85,6 +96,10 @@ class HeartRateMonitor extends StatefulWidget {
 }
 
 class _HeartRateMonitorState extends State<HeartRateMonitor> {
+  double stressIndex = 0.0;
+  double amo = 0.0;
+  double modus = 0.0;
+  double MxDMn = 0.0;
   List<BluetoothService> services = [];
   bool isConnected = false;
   int heartRate = 0;
@@ -103,6 +118,10 @@ class _HeartRateMonitorState extends State<HeartRateMonitor> {
   double averageRmssd = 0.0;
   double averagePnn50 = 0.0;
   double averagerr = 0.0;
+  List<int> bpmwaktu = [];
+  List<int> rrintervalwaktu = [];
+  bool isdone = false;
+
   BluetoothCharacteristic? hrCharacteristic;
 
   @override
@@ -169,7 +188,39 @@ class _HeartRateMonitorState extends State<HeartRateMonitor> {
       });
     });
   }
+  Future<void> requestStoragePermission() async {
+  var status = await Permission.manageExternalStorage.status;
+  if (!status.isGranted) {
+    await Permission.manageExternalStorage.request();
 
+  }
+    else if (status.isDenied) {
+    // Izin ditolak, tampilkan dialog untuk meminta izin
+    await Permission.manageExternalStorage.request();
+  } else if (status.isPermanentlyDenied) {
+    // Izin ditolak secara permanen, arahkan pengguna ke pengaturan
+    await openAppSettings();
+  }
+}
+
+void generateExcel() async {
+  DateTime waktuaktual = DateTime.now();
+  String url =
+        "https://heartratemonitoring-c0e5d-default-rtdb.firebaseio.com/data/${DateFormat('yyyy-MM-dd').format(waktuaktual)}/${DateFormat('HH-mm-ss').format(waktuaktual)}.json";
+    Map<String, String> data = {"BPM List": bpmwaktu.toString(),"Amo":amo.toString(),"Modus" : modus.toString(),"RRInterval":rrintervalwaktu.toString(),'MxDMn':MxDMn.toString(),"StresIndex":stressIndex.toString()};
+    final response = await http.patch(
+      Uri.parse(url),
+      headers: <String, String>{
+        'Content-Type': 'application/json; charset=UTF-8',
+      },
+      body: jsonEncode(data),
+    );
+    if (response.statusCode == 200) {
+      print('Data uploaded successfully');
+    } else {
+      print('Failed to upload data. Status code: ${response.statusCode}');
+    }
+}
   void calculateMetrics() {
     if (rrIntervals.isEmpty) {
       return;
@@ -217,16 +268,38 @@ class _HeartRateMonitorState extends State<HeartRateMonitor> {
   }
 
   void calculateAverages() {
-    if (bpmList.isNotEmpty) {
-      averageBpm = bpmList.reduce((a, b) => a + b).toDouble() / bpmList.length;
-    }
-    if (rrIntervals.isNotEmpty) {
-      averageSdnn = sdnn;
-      averageRmssd = rmssd;
-      averagePnn50 = pnn50;
-      averageRrInterval = totalRrInterval / rrIntervalCount;
-      averagerr = totalRrInterval/rrIntervalCount;
-    }
+  
+  if (bpmList.isNotEmpty) {
+    averageBpm = bpmList.reduce((a, b) => a + b).toDouble() / bpmList.length;
+    bpmwaktu = bpmList;
+  }
+  if (rrIntervals.isNotEmpty) {
+    rrintervalwaktu = rrIntervals;
+    averageSdnn = sdnn;
+    averageRmssd = rmssd;
+    averagePnn50 = pnn50;
+    averageRrInterval = totalRrInterval / rrIntervalCount;
+    averagerr = totalRrInterval / rrIntervalCount;
+
+    // Hitung Stress Index (SI)
+    var modeMap = <int, int>{};
+    rrIntervals.forEach((interval) {
+      modeMap[interval] = (modeMap[interval] ?? 0) + 1;
+    });
+
+    // Menghitung modus
+    modus = modeMap.entries.reduce((a, b) => a.value > b.value ? a : b).key.toDouble();
+
+    // Menghitung AMo
+    var AMo = modeMap[modus.toInt()]!.toDouble() / rrIntervalCount.toDouble();
+
+    // Menghitung MxDMn
+    var maxRr = rrIntervals.reduce((a, b) => a > b ? a : b).toDouble();
+    var minRr = rrIntervals.reduce((a, b) => a < b ? a : b).toDouble();
+    var MxDMn = maxRr - minRr;
+
+    // Menghitung Stress Index
+    var stressIndex = (AMo * 100) / (2 * (modus / 1000) * (MxDMn / 1000));
 
     setState(() {
       averageBpm = averageBpm;
@@ -235,11 +308,19 @@ class _HeartRateMonitorState extends State<HeartRateMonitor> {
       averagePnn50 = averagePnn50;
       averageRrInterval = averageRrInterval;
       averagerr = averagerr;
-      // averageRrInterval = rrIntervals.isNotEmpty
-      //     ? rrIntervals.reduce((a, b) => a + b).toDouble() / rrIntervals.length
-      //     : 0.0;
+      this.stressIndex = stressIndex;
+      amo = AMo;
+      this.modus = modus;
+      this.MxDMn = MxDMn;
+      isdone = true;
+      bpmwaktu;
+      rrintervalwaktu;
+      this.bpmwaktu = bpmwaktu;
+
+      this.rrintervalwaktu = rrintervalwaktu;
     });
   }
+}
 
   @override
   Widget build(BuildContext context) {
@@ -347,6 +428,24 @@ class _HeartRateMonitorState extends State<HeartRateMonitor> {
                     style: TextStyle(fontSize: 48, fontWeight: FontWeight.bold),
                   ),
                   SizedBox(height: 20),
+                  SizedBox(height: 20),
+Text(
+  'Stress Index (SI):',
+  style: TextStyle(fontSize: 24),
+),
+Text(
+  '${stressIndex.toStringAsFixed(2)}',
+  style: TextStyle(fontSize: 48, fontWeight: FontWeight.bold),
+),
+isdone ?
+ElevatedButton(
+  onPressed: () async {
+    // await requestStoragePermission();
+    generateExcel();
+  },
+  child: Text('Save ke Database'),
+):Text(''),
+
                   // Display services and characteristics
                   Column(
                     children: services.map((service) {
@@ -400,6 +499,7 @@ class _HeartRateMonitorState extends State<HeartRateMonitor> {
                   ),
                 ],
               ),
+              
             )
           : Center(
               child: CircularProgressIndicator(),
